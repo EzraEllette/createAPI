@@ -81,7 +81,6 @@ func (t *resourceTrieNode) createResources(client *apigateway.Client, apiId *str
 			if err != nil {
 				panic(err)
 			}
-			fmt.Println("\n\n", *lambdaCreator.GetARN(k))
 
 			responseOptions := &apigateway.PutMethodResponseInput{
 				RestApiId:      apiId,
