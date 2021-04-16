@@ -12,18 +12,27 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/apigateway"
 	"github.com/aws/aws-sdk-go-v2/service/apigateway/types"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
+	"github.com/google/uuid"
 )
 
 // resourceFunctions ResourceId, functionName
 var resourceFunctions map[string]string
+var client gatewayCreatorClient
 
 func init() {
 	resourceFunctions = map[string]string{}
+	client = gatewayCreatorClient{}
 }
 
 type resourceTrieNode struct {
 	Children map[string]*resourceTrieNode `json:"children"`
 	Value    string                       `json:"value"`
+}
+
+type gatewayCreatorClient struct {
+	Gateway *apigateway.Client `json:"client"`
+	Config  aws.Config         `json:"config"`
+	ApiId   *string            `json:"apiId"`
 }
 
 func (t *resourceTrieNode) insert(value string) {
@@ -41,7 +50,7 @@ func (t *resourceTrieNode) insert(value string) {
 		} else {
 			newNode := &resourceTrieNode{
 				Children: map[string]*resourceTrieNode{},
-				Value:    resource,
+				Value:    string(strings.Join(pathParts, "-")),
 			}
 			currentNode.Children[resource] = newNode
 			currentNode = currentNode.Children[resource]
@@ -49,97 +58,116 @@ func (t *resourceTrieNode) insert(value string) {
 	}
 }
 
-func (t *resourceTrieNode) createResources(client *apigateway.Client, apiId *string, parentId *string) {
+func createResource(pathPart string, parentId *string) (resource *apigateway.CreateResourceOutput, err error) {
+	resourceConfig := &apigateway.CreateResourceInput{
+		RestApiId: client.ApiId,
+		PathPart:  &pathPart,
+		ParentId:  parentId,
+	}
+	resource, err = client.Gateway.CreateResource(context.TODO(), resourceConfig)
+	return
+}
+
+func createMethodInput(resourceId *string) (err error) {
+	methodInput := &apigateway.PutMethodInput{
+		AuthorizationType: aws.String("NONE"),
+		HttpMethod:        aws.String("ANY"),
+		RestApiId:         client.ApiId,
+		ResourceId:        resourceId,
+		ApiKeyRequired:    false,
+	}
+
+	_, err = client.Gateway.PutMethod(context.TODO(), methodInput)
+	return
+}
+
+func createMethodResponse(resourceId *string) (err error) {
+	responseOptions := &apigateway.PutMethodResponseInput{
+		RestApiId:      client.ApiId,
+		StatusCode:     aws.String("200"),
+		ResourceId:     resourceId,
+		HttpMethod:     aws.String("ANY"),
+		ResponseModels: map[string]string{"application/json": "Empty"},
+	}
+
+	_, err = client.Gateway.PutMethodResponse(context.TODO(), responseOptions)
+	return
+}
+
+func createMethodIntegration(functionName string, resourceId *string) (err error) {
+	uri := "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/" + *lambdaCreator.GetARN(functionName) + "/invocations"
+
+	fmt.Println("adding integration for " + functionName)
+
+	integrationConfig := &apigateway.PutIntegrationInput{
+		HttpMethod:            aws.String("ANY"),
+		ResourceId:            resourceId,
+		RestApiId:             client.ApiId,
+		Type:                  types.IntegrationTypeAws,
+		IntegrationHttpMethod: aws.String("POST"),
+		Uri:                   &uri,
+	}
+
+	_, err = client.Gateway.PutIntegration(context.TODO(), integrationConfig)
+	return
+}
+
+func createMethodIntegrationResponse(resourceId *string) (err error) {
+	integrationResponseOptions := &apigateway.PutIntegrationResponseInput{
+		HttpMethod:        aws.String("ANY"),
+		ResourceId:        resourceId,
+		RestApiId:         client.ApiId,
+		StatusCode:        aws.String("200"),
+		ResponseTemplates: map[string]string{"application/json": ""},
+	}
+
+	_, err = client.Gateway.PutIntegrationResponse(context.TODO(), integrationResponseOptions)
+	return
+}
+
+func (t *resourceTrieNode) createResources(apiId *string, parentId *string) {
 	nodes := make(chan *resourceTrieNode, 400)
-	// children := make(chan *resourceTrieNode, 400)
 
 	nodes <- t
 
 	for len(nodes) > 0 {
 		currentNode := <-nodes
 		for k, v := range currentNode.Children {
-			resourceConfig := &apigateway.CreateResourceInput{
-				RestApiId: apiId,
-				PathPart:  &k,
-				ParentId:  parentId,
-			}
-			resource, err := client.CreateResource(context.TODO(), resourceConfig)
-
-			if err != nil {
-				panic(err)
-			}
-
-			methodInput := &apigateway.PutMethodInput{
-				AuthorizationType: aws.String("NONE"),
-				HttpMethod:        aws.String("ANY"),
-				RestApiId:         apiId,
-				ResourceId:        resource.Id,
-				ApiKeyRequired:    false,
-			}
-
-			_, err = client.PutMethod(context.TODO(), methodInput)
-			if err != nil {
-				panic(err)
-			}
-
-			responseOptions := &apigateway.PutMethodResponseInput{
-				RestApiId:      apiId,
-				StatusCode:     aws.String("200"),
-				ResourceId:     resource.Id,
-				HttpMethod:     aws.String("ANY"),
-				ResponseModels: map[string]string{"application/json": "Empty"},
-			}
-
-			_, err = client.PutMethodResponse(context.TODO(), responseOptions)
+			resource, err := createResource(k, parentId)
 			handleErrors.Check(err)
 
-			uri := "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/" + *lambdaCreator.GetARN(k) + "/invocations"
-			fmt.Println(uri)
 			if len(v.Children) == 0 {
-				fmt.Println("adding integration")
-				integrationConfig := &apigateway.PutIntegrationInput{
-					HttpMethod:            aws.String("ANY"),
-					ResourceId:            resource.Id,
-					RestApiId:             apiId,
-					Type:                  types.IntegrationTypeAws,
-					IntegrationHttpMethod: aws.String("POST"),
-					Uri:                   &uri,
-				}
 
-				_, err = client.PutIntegration(context.TODO(), integrationConfig)
-				if err != nil {
-					panic(err)
-				}
-				resourceFunctions[*resource.Id] = *lambdaCreator.GetARN(k)
-				integrationResponseOptions := &apigateway.PutIntegrationResponseInput{
-					HttpMethod:        aws.String("ANY"),
-					ResourceId:        resource.Id,
-					RestApiId:         apiId,
-					StatusCode:        aws.String("200"),
-					ResponseTemplates: map[string]string{"application/json": ""},
-					// ResponseParameters: map[string]string{
-					// 	"Access-Control-Allow-Origin":  "*",
-					// 	"Access-Control-Allow-Headers": "'Content-Type,X-Amz-Date,Authorization,x-api-key,x-amz-security-token'",
-					// 	"Access-Control-Allow-Methods": "'GET,POST,DELETE,PUT,PATCH,OPTIONS'",
-					// },
-				}
+				createMethodInput(resource.Id)
+				handleErrors.Check(err)
 
-				_, err := client.PutIntegrationResponse(context.TODO(), integrationResponseOptions)
-				if err != nil {
-					panic(err)
-				}
+				err = createMethodResponse(resource.Id)
+				handleErrors.Check(err)
+
+				err = createMethodIntegration(v.Value, resource.Id)
+				handleErrors.Check(err)
+
+				resourceFunctions[*resource.Id] = *lambdaCreator.GetARN(v.Value)
+
+				err = createMethodIntegrationResponse(resource.Id)
+				handleErrors.Check(err)
 			}
 
-			v.createResources(client, apiId, resource.Id)
+			v.createResources(apiId, resource.Id)
 		}
 	}
 }
 
-func new(basePath string) *resourceTrieNode {
-	trie := &resourceTrieNode{
+func createTrie() *resourceTrieNode {
+	return &resourceTrieNode{
 		Children: map[string]*resourceTrieNode{},
 		Value:    "/",
 	}
+}
+
+func new(basePath string) *resourceTrieNode {
+	trie := createTrie()
+
 	eachFile.Recursive(basePath, func(filename string, file []byte) {
 		if filename == basePath {
 			return
@@ -149,9 +177,7 @@ func new(basePath string) *resourceTrieNode {
 	return trie
 }
 
-func CreateApigateway(cfg aws.Config, lamClient *lambda.Client) (stageURL string, err error) {
-	gatewayClient := apigateway.NewFromConfig(cfg)
-
+func createGateway() (gateway *apigateway.CreateRestApiOutput, err error) {
 	APIInput := &apigateway.CreateRestApiInput{
 		Name: aws.String("autoLambdaTestAPI"),
 		Policy: aws.String(`{
@@ -172,6 +198,14 @@ func CreateApigateway(cfg aws.Config, lamClient *lambda.Client) (stageURL string
 		} `),
 	}
 
+	gateway, err = client.Gateway.CreateRestApi(context.TODO(), APIInput)
+	return
+}
+
+func CreateApigateway(cfg aws.Config, lamClient *lambda.Client) (stageURL string, err error) {
+	gatewayClient := apigateway.NewFromConfig(cfg)
+	client.Gateway = gatewayClient
+
 	// 	{
 	//     "Version": "2012-10-17",
 	//     "Statement": [
@@ -186,8 +220,10 @@ func CreateApigateway(cfg aws.Config, lamClient *lambda.Client) (stageURL string
 	//     ]
 	// }
 	// https://docs.aws.amazon.com/sdk-for-go/api/service/apigateway/#APIGateway.CreateApiKey
-	gateway, err := gatewayClient.CreateRestApi(context.TODO(), APIInput)
+	gateway, err := createGateway()
 	handleErrors.Check(err)
+
+	client.ApiId = gateway.Id
 
 	resources, err := gatewayClient.GetResources(context.TODO(), &apigateway.GetResourcesInput{
 		RestApiId: gateway.Id,
@@ -195,7 +231,7 @@ func CreateApigateway(cfg aws.Config, lamClient *lambda.Client) (stageURL string
 	handleErrors.Check(err)
 
 	trie := new("functions")
-	trie.createResources(gatewayClient, gateway.Id, resources.Items[0].Id)
+	trie.createResources(gateway.Id, resources.Items[0].Id)
 
 	deploymentConfig := &apigateway.CreateDeploymentInput{
 		RestApiId: gateway.Id,
@@ -217,7 +253,7 @@ func CreateApigateway(cfg aws.Config, lamClient *lambda.Client) (stageURL string
 			Action:       aws.String("lambda:*"),
 			FunctionName: &v,
 			Principal:    aws.String("*"),
-			StatementId:  aws.String("12315"),
+			StatementId:  aws.String(uuid.NewString()),
 		})
 		handleErrors.Check(err)
 	}

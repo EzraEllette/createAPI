@@ -32,10 +32,6 @@ func main() {
 	lamClient, err := lambdaCreator.DeployLambdas(cfg)
 	handleErrors.Check(err)
 
-	for k, v := range lambdaCreator.LambdaARNs {
-		fmt.Println(k, *v)
-	}
-
 	url, err := gatewayCreator.CreateApigateway(cfg, lamClient)
 	handleErrors.Check(err)
 

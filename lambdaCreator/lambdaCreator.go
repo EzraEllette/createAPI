@@ -49,7 +49,7 @@ func createLambda(client *lambda.Client, lambdaRoleARN *string, functionName *st
 	fmt.Println("function created", *lamFunction.FunctionArn)
 }
 
-// DeployLambdas creates ambdas from the functions folder
+// DeployLambdas creates lambdas from the functions folder
 func DeployLambdas(cfg aws.Config) (lamClient *lambda.Client, err error) {
 
 	lambdaRoleARN, err := lambdaRole.Create(cfg)
@@ -66,21 +66,25 @@ func DeployLambdas(cfg aws.Config) (lamClient *lambda.Client, err error) {
 	return
 }
 
-// currently only works with files that match /\.{2}$/
 func toFunctionName(fileName string) string {
 	file := strings.Split(fileName, "/")
-	functionName := file[len(file)-1]
-	functionName = strings.Split(functionName, ".")[0]
-	return functionName
+	lastPart := strings.Split(file[len(file)-1], ".")[0]
+	file[len(file)-1] = lastPart
+	return string(strings.Join(file, "-"))[10:]
+}
+
+func getFileExtension(file string) string {
+	extension := ""
+
+	for i := len(file) - 1; file[i] != '.'; i-- {
+		extension = string(file[i]) + extension
+	}
+
+	return "." + extension
 }
 
 func toFileName(fileName string) string {
-	currentIdx := len(fileName) - 1
-	for currentIdx >= 0 && fileName[currentIdx] != '/' {
-		currentIdx--
-	}
-
-	return fileName[currentIdx+1:]
+	return toFunctionName(fileName) + getFileExtension(fileName)
 }
 
 func compressFile(fileName string, file []byte) []byte {
